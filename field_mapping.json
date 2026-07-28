@@ -1,0 +1,12 @@
+{
+  "notes": "Add source-label aliases here as new issuer/export formats are introduced.",
+  "manual_fields": [
+    "Reoffer / Upfront (%)",
+    "Coupon p.a. (%)"
+  ],
+  "generated_by_agile": [
+    "Status",
+    "Error Message",
+    "Reference ID"
+  ]
+}

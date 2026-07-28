@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyCharm / IDE files
+.idea/
+.vscode/
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Local outputs and uploaded data
+output/
+outputs/
+uploaded_files/
+temp/
+*.eml
+*_mapping.json
+*_agile_email.html
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini

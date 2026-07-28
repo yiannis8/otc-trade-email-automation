@@ -1,0 +1,21 @@
+,Demo Trade 1,Demo Trade 2
+Direction,MS Receives,MS Receives
+Size,"1,000,000","2,000,000"
+Assets,"SX5E Index, SPX Index","UKX Index, SMI Index"
+Maturity Date,17-Jul-28,17-Jul-28
+Currency,USD,USD
+Reference Date,17-Jul-26,17-Jul-26
+KO Barrier,"100,100,100,100","100,100,100,100"
+Coupon Barrier,"75,75,75,75","70,70,70,70"
+KI Barrier,60,55
+KI Monitoring Type,European,European
+Put Type,Put,Put
+Put Strike,75,70
+Put Leverage,133.3333,142.8571
+Memory,Yes,Yes
+Coupon Dates,"17-Oct-26,17-Jan-27,17-Apr-27,17-Jul-27","17-Oct-26,17-Jan-27,17-Apr-27,17-Jul-27"
+KO Dates,"17-Jul-27,17-Oct-27,17-Jan-28,17-Apr-28","17-Jul-27,17-Oct-27,17-Jan-28,17-Apr-28"
+Funding Type,Swap,Swap
+Swap Benchmark,SOFR,SOFR
+Swap Spread,0,0
+Bid,0.50,0.65
