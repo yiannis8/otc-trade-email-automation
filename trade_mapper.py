@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.message import EmailMessage
-from email.policy import default
+from email.policy import SMTP
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -42,9 +42,6 @@ EMAIL_COLUMNS = [
     "Downside Leverage (%)",
     "Barrier Type",
     "Barrier Level",
-    "Status",
-    "Error Message",
-    "Reference ID",
 ]
 
 ALIASES = {
@@ -116,6 +113,26 @@ def _clean_value(value: Any) -> str:
     return str(value).strip()
 
 
+def _decode_csv_text(raw: bytes) -> str:
+    """Decode CSV exports without introducing Unicode replacement characters.
+
+    Excel/Windows CSV exports are frequently UTF-8, UTF-16, or Windows-1252.
+    Decoding UTF-8 with ``errors="replace"`` turns otherwise valid punctuation
+    and accented characters into U+FFFD, which Outlook often renders as ``?``.
+    """
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+
+    # latin-1 is exhaustive, so this is only a defensive fallback.
+    return raw.decode("utf-8-sig")
+
+
 def _read_rows(path_or_bytes: str | Path | bytes, filename: str | None = None) -> list[list[Any]]:
     if isinstance(path_or_bytes, bytes):
         raw = path_or_bytes
@@ -132,7 +149,7 @@ def _read_rows(path_or_bytes: str | Path | bytes, filename: str | None = None) -
         ws = wb[wb.sheetnames[0]]
         rows = [list(row) for row in ws.iter_rows(values_only=True)]
     else:
-        text = raw.decode("utf-8-sig", errors="replace")
+        text = _decode_csv_text(raw)
         rows = list(csv.reader(io.StringIO(text)))
 
     rows = [row for row in rows if any(_clean_value(value) for value in row)]
@@ -431,8 +448,6 @@ def map_trade(
             "Coupons per observation exists, but Coupon p.a. is not annualised automatically. Review this value before sending."
         )
     if has_put and not canonical.get("strike_forward"):
-        fields["Status"] = "Error"
-        fields["Error Message"] = "Strike Forward (Bd) should be greater than zero"
         notes.append("Strike Forward (Bd) is missing. Add it if Agile requires this field.")
 
     if manual_overrides:
@@ -460,32 +475,63 @@ def _field_rows(fields_or_rows: dict[str, str] | Iterable[dict[str, str]]) -> li
     return list(fields_or_rows)
 
 
+def _html_cell_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    # Remove control characters that can corrupt HTML/MIME while preserving tabs/newlines.
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    escaped = html.escape(text, quote=True)
+    return escaped.replace("\r\n", "<br>").replace("\r", "<br>").replace("\n", "<br>")
+
+
 def build_html_table(fields_or_rows: dict[str, str] | Iterable[dict[str, str]]) -> str:
+    """Build Outlook-safe HTML using inline styles only.
+
+    Desktop Outlook uses the Microsoft Word rendering engine and ignores or
+    inconsistently applies several modern CSS features. Keeping all critical
+    table styling inline produces a much more stable result in Outlook and in
+    downloaded .eml files.
+    """
     rows = _field_rows(fields_or_rows)
-    headers = "".join(f"<th>{html.escape(column)}</th>" for column in EMAIL_COLUMNS)
+    table_style = (
+        "border-collapse:collapse;border-spacing:0;"
+        "mso-table-lspace:0pt;mso-table-rspace:0pt;"
+        "font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#111111;"
+    )
+    header_style = (
+        "border:1px solid #b7b7b7;background-color:#f2f2f2;"
+        "padding:4px 6px;font-family:Arial,Helvetica,sans-serif;font-size:10px;"
+        "font-weight:700;text-align:left;vertical-align:top;white-space:normal;"
+    )
+    cell_style = (
+        "border:1px solid #b7b7b7;padding:4px 6px;"
+        "font-family:Arial,Helvetica,sans-serif;font-size:10px;"
+        "text-align:left;vertical-align:top;white-space:normal;"
+    )
+
+    headers = "".join(
+        f'<th style="{header_style}">{_html_cell_text(column)}</th>'
+        for column in EMAIL_COLUMNS
+    )
     body_rows = []
     for fields in rows:
         values = "".join(
-            f"<td>{html.escape(str(fields.get(column, '')))}</td>"
+            f'<td style="{cell_style}">{_html_cell_text(fields.get(column, ""))}</td>'
             for column in EMAIL_COLUMNS
         )
         body_rows.append(f"<tr>{values}</tr>")
     body = "".join(body_rows)
+
     return f"""<!doctype html>
 <html>
 <head>
-<meta charset="utf-8">
-<style>
-body {{ font-family: Arial, sans-serif; font-size: 12px; color: #111; }}
-.table-wrap {{ overflow-x: auto; max-width: 100%; }}
-table {{ border-collapse: collapse; white-space: nowrap; }}
-th, td {{ border: 1px solid #b7b7b7; padding: 6px 8px; vertical-align: top; }}
-th {{ background: #f2f2f2; font-weight: 600; }}
-tbody tr:nth-child(even) {{ background: #fafafa; }}
-</style>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
-<body>
-<div class="table-wrap"><table><thead><tr>{headers}</tr></thead><tbody>{body}</tbody></table></div>
+<body style="margin:0;padding:0;font-family:Arial,Helvetica,sans-serif;font-size:10px;color:#111111;">
+<table role="table" cellpadding="0" cellspacing="0" border="0" style="{table_style}">
+<thead><tr>{headers}</tr></thead>
+<tbody>{body}</tbody>
+</table>
 </body>
 </html>"""
 
@@ -495,12 +541,22 @@ def build_eml(
     subject: str,
     fields_or_rows: dict[str, str] | Iterable[dict[str, str]],
 ) -> bytes:
-    message = EmailMessage(policy=default)
+    """Create an Outlook-friendly RFC 5322 message with explicit UTF-8 encoding."""
+    message = EmailMessage(policy=SMTP)
     message["To"] = to_address
     message["Subject"] = subject
-    message.set_content("This message contains an HTML trade table. Please open it in an HTML-capable email client.")
-    message.add_alternative(build_html_table(fields_or_rows), subtype="html")
-    return message.as_bytes()
+    message.set_content(
+        "This message contains an HTML trade table. Please open it in an HTML-capable email client.",
+        charset="utf-8",
+        cte="base64",
+    )
+    message.add_alternative(
+        build_html_table(fields_or_rows),
+        subtype="html",
+        charset="utf-8",
+        cte="base64",
+    )
+    return message.as_bytes(policy=SMTP)
 
 
 def combined_subject(results: Iterable[MappingResult]) -> str:
@@ -570,3 +626,4 @@ if __name__ == "__main__":
             print(f"\nReview notes for {result.trade_id or 'trade'}:")
             for note in result.review_notes:
                 print(f"- {note}")
+
