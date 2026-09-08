@@ -408,7 +408,15 @@ def map_trade(
     barrier_level = "" if knock_in_missing else _percentage_number(knock_in)
 
     coupon_barrier = canonical.get("coupon_barrier", "")
-    coupon_type = "Conditional" if _split_values(coupon_barrier) else "Fixed"
+    coupon_barrier_value = _percentage_number(coupon_barrier)
+
+    if coupon_barrier_value == "0":
+        coupon_type = "Guaranteed"
+    elif _split_values(coupon_barrier):
+        coupon_type = "Conditional"
+    else:
+        coupon_type = "Fixed"
+    
 
     fields = {column: "" for column in EMAIL_COLUMNS}
     fields.update(
