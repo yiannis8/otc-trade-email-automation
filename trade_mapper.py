@@ -7,7 +7,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.policy import SMTP
 from pathlib import Path
@@ -19,6 +19,7 @@ EMAIL_COLUMNS = [
     "Rates Curve Index",
     "Issuer / Spread",
     "Currency",
+    "Basket Type",
     "Size",
     "Bloomberg Ticker 1",
     "Bloomberg Ticker 2",
@@ -48,6 +49,7 @@ ALIASES = {
     "direction": ["direction", "side"],
     "size": ["size", "notional", "amount"],
     "assets": ["assets", "underlyings", "basket", "underlying assets"],
+    "basket_type": ["basket type", "basket_type", "payoff basket type"],
     "maturity_date": ["maturity date", "maturity", "redemption date"],
     "currency": ["currency", "ccy"],
     "reference_date": ["reference date", "strike date", "initial valuation date"],
@@ -71,6 +73,21 @@ ALIASES = {
     "strike_forward": ["strike forward (bd)", "strike forward", "bd"],
 }
 
+# Source "Basket Type" vocabulary -> Agile vocabulary.
+BASKET_TYPES = {
+    "BASKET": "Equally Weighted Basket",
+    "EQUALLY WEIGHTED": "Equally Weighted Basket",
+    "EQUALLY WEIGHTED BASKET": "Equally Weighted Basket",
+    "EW": "Equally Weighted Basket",
+    "EW BASKET": "Equally Weighted Basket",
+    "WORST OF": "Worst Of",
+    "WORSTOF": "Worst Of",
+    "WO": "Worst Of",
+    "BEST OF": "Best Of",
+    "BESTOF": "Best Of",
+    "BO": "Best Of",
+}
+
 COUNTERPARTY_SUBJECT = {
     "MORGAN STANLEY": "MS",
     "MS": "MS",
@@ -86,6 +103,13 @@ COUNTERPARTY_SUBJECT = {
     "HSBC": "HSBC",
     "UBS": "UBS",
 }
+
+# Placeholder Agile expects in a level schedule for an observation date where the
+# feature (autocall / coupon) cannot trigger, e.g. a delayed first autocall.
+SCHEDULE_NONE = "None"
+SCHEDULE_SEPARATOR = "/"
+# Two dates are treated as the same observation if they fall within this window.
+DATE_MATCH_TOLERANCE = timedelta(days=10)
 
 
 @dataclass
@@ -122,13 +146,11 @@ def _decode_csv_text(raw: bytes) -> str:
     """
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return raw.decode("utf-16")
-
     for encoding in ("utf-8-sig", "cp1252", "latin-1"):
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:
             continue
-
     # latin-1 is exhaustive, so this is only a defensive fallback.
     return raw.decode("utf-8-sig")
 
@@ -238,7 +260,6 @@ def load_trade_file(
                 trade_id = value
                 break
         trades.append((source, trade_id or f"Trade {row_number}"))
-
     if not trades:
         raise ValueError("The file does not contain any trade rows.")
     return trades
@@ -289,6 +310,10 @@ def _parse_date(value: str) -> datetime | None:
     return None
 
 
+def _parse_dates(value: str) -> list[datetime]:
+    return [date for date in (_parse_date(part) for part in _split_values(value)) if date]
+
+
 def _first_date(value: str) -> datetime | None:
     values = _split_values(value)
     return _parse_date(values[0]) if values else _parse_date(value)
@@ -303,17 +328,30 @@ def _months_between(start: datetime | None, end: datetime | None) -> str:
     return str(max(months, 0))
 
 
-def _percentage_number(value: str) -> str:
-    values = _split_values(value)
-    text = values[0] if values else str(value or "")
-    text = text.strip().replace("%", "").replace(",", "")
+def _number_text(text: str) -> str:
+    """Return a compact numeric string ('100.00%' -> '100'), or the input if not numeric."""
+    text = str(text or "").strip().replace("%", "").replace(",", "")
     if not text or text.upper() in {"NA", "N/A", "NONE"}:
         return ""
     try:
-        number = float(text)
-        return f"{number:g}"
+        return f"{float(text):g}"
     except ValueError:
         return text
+
+
+def _percentage_number(value: str) -> str:
+    values = _split_values(value)
+    return _number_text(values[0] if values else str(value or ""))
+
+
+def _percentage_numbers(value: str) -> list[float]:
+    numbers: list[float] = []
+    for part in _split_values(value):
+        try:
+            numbers.append(float(part.replace("%", "").replace(",", "")))
+        except ValueError:
+            continue
+    return numbers
 
 
 def _yes_no(value: str) -> str:
@@ -333,20 +371,148 @@ def _tickers(assets: str) -> list[str]:
     return result[:5]
 
 
+def _basket_type(value: str, ticker_count: int) -> tuple[str, str]:
+    """Map the source basket type into Agile vocabulary.
+
+    Returns (agile_value, review_note). The note is empty when nothing needs attention.
+    """
+    text = str(value or "").strip()
+    key = re.sub(r"[^A-Z ]", " ", text.upper())
+    key = re.sub(r"\s+", " ", key).strip()
+    if key in BASKET_TYPES:
+        return BASKET_TYPES[key], ""
+    if key in {"", "NA", "N A", "NONE", "SINGLE"}:
+        if ticker_count > 1:
+            return "", "Basket Type is missing although several underlyings were found. Confirm the basket type with Agile."
+        return "", ""
+    # Unknown vocabulary: pass it through unchanged so the user can see and edit it.
+    return text, f"Basket Type '{text}' is not in the known Agile vocabulary. Review before sending."
+
+
+def _gap_months(left: datetime, right: datetime) -> int:
+    months = (right.year - left.year) * 12 + right.month - left.month
+    if right.day < left.day - 5:
+        months -= 1
+    return max(months, 0)
+
+
 def _frequency(dates_value: str) -> tuple[str, str]:
-    dates = [_parse_date(value) for value in _split_values(dates_value)]
-    dates = [date for date in dates if date]
+    dates = _parse_dates(dates_value)
     if len(dates) < 2:
         return "", ""
-    gaps = []
-    for left, right in zip(dates, dates[1:]):
-        months = (right.year - left.year) * 12 + right.month - left.month
-        if right.day < left.day - 5:
-            months -= 1
-        gaps.append(max(months, 0))
+    gaps = [_gap_months(left, right) for left, right in zip(dates, dates[1:])]
     gap = Counter(gaps).most_common(1)[0][0]
     labels = {1: "Monthly", 3: "Quarterly", 6: "Semi Annually", 12: "Annually"}
     return labels.get(gap, f"Every {gap} months"), str(gap)
+
+
+def _observation_grid(
+    coupon_dates: list[datetime],
+    ko_dates: list[datetime],
+    strike_date: datetime | None,
+    maturity: datetime | None,
+    gap_months: int,
+) -> list[datetime]:
+    """Return the observation calendar used to lay out level schedules.
+
+    Preference order:
+    1. Coupon dates (the denser calendar, normally starting at the first period).
+    2. A synthetic calendar from the strike date at the detected frequency.
+    3. The autocall dates themselves.
+    """
+    if coupon_dates:
+        return coupon_dates
+    if strike_date and maturity and gap_months > 0:
+        grid: list[datetime] = []
+        year, month = strike_date.year, strike_date.month
+        while True:
+            month += gap_months
+            year += (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            day = min(strike_date.day, 28)
+            point = datetime(year, month, day)
+            if point > maturity + DATE_MATCH_TOLERANCE:
+                break
+            grid.append(point)
+        if grid:
+            return grid
+    return ko_dates
+
+
+def _level_schedule(grid: list[datetime], dates: list[datetime], levels: list[float]) -> list[str]:
+    """Lay out one level per grid observation, using SCHEDULE_NONE where no date matches."""
+    schedule: list[str] = []
+    for point in grid:
+        match = None
+        for index, date in enumerate(dates):
+            if abs((date - point).days) <= DATE_MATCH_TOLERANCE.days:
+                match = index
+                break
+        if match is None or match >= len(levels):
+            schedule.append(SCHEDULE_NONE)
+        else:
+            schedule.append(f"{levels[match]:g}")
+    return schedule
+
+
+def _compact_schedule(schedule: list[str]) -> list[str]:
+    """Drop trailing repeats: Agile carries the last level forward to maturity,
+    so ``None/100/100/100/95/95/95`` is sent as ``None/100/100/100/95``."""
+    compact = list(schedule)
+    while len(compact) > 1 and compact[-1] == compact[-2]:
+        compact.pop()
+    return compact
+
+
+def _trigger_and_step(
+    levels_value: str,
+    dates_value: str,
+    grid: list[datetime],
+) -> tuple[str, str, str]:
+    """Return (trigger_level, step_down_up, note) following the Agile convention.
+
+    * Flat schedule with no delayed start: trigger level = the level, step = "".
+    * Anything else (step down/up or a delayed first observation): trigger level
+      is left blank and the per-observation schedule goes in the step column,
+      e.g. ``None/100/100/100/95``. Trailing repeats are dropped because Agile
+      carries the last level forward to maturity.
+    """
+    levels = _percentage_numbers(levels_value)
+    if not levels:
+        return "", "", ""
+
+    dates = _parse_dates(dates_value)
+    schedule = _level_schedule(grid, dates, levels) if grid and dates else [f"{level:g}" for level in levels]
+
+    delayed = schedule and schedule[0] == SCHEDULE_NONE
+    flat = len(set(levels)) == 1
+    if flat and not delayed:
+        return f"{levels[0]:g}", "", ""
+
+    note = ""
+    if delayed:
+        skipped = sum(1 for item in schedule if item == SCHEDULE_NONE)
+        note = (
+            f"Delayed start: the first {skipped} observation date{'s carry' if skipped != 1 else ' carries'} "
+            f"no autocall and {'are' if skipped != 1 else 'is'} sent as '{SCHEDULE_NONE}'."
+        )
+    return "", SCHEDULE_SEPARATOR.join(_compact_schedule(schedule)), note
+
+
+def _coupon_pa(coupons_value: str, coupon_pa_value: str, gap_months: int) -> tuple[str, str]:
+    """Annualise coupons per observation, unless a coupon p.a. is already given."""
+    explicit = _percentage_number(coupon_pa_value)
+    if explicit:
+        return explicit, ""
+    coupons = _percentage_numbers(coupons_value)
+    if not coupons:
+        return "", ""
+    if len(set(coupons)) > 1:
+        return "Variable", "Coupons per observation vary across dates; Coupon p.a. needs a manual decision."
+    if gap_months <= 0:
+        return "", "Coupon p.a. could not be annualised because the coupon frequency is unknown."
+    annual = coupons[0] * 12 / gap_months
+    return f"{round(annual, 6):g}", ""
 
 
 def _step(value: str) -> str:
@@ -380,18 +546,32 @@ def map_trade(
 ) -> MappingResult:
     canonical, unmapped = _canonical_values(source)
     notes: list[str] = []
+
     tickers = _tickers(canonical.get("assets", ""))
     strike_date = _first_date(canonical.get("reference_date", ""))
     maturity = _parse_date(canonical.get("maturity_date", ""))
-    ko_dates = canonical.get("ko_dates", "")
-    first_ko = _first_date(ko_dates)
-    frequency, _ = _frequency(ko_dates)
 
-    has_ko = bool(_split_values(ko_dates))
+    ko_dates_value = canonical.get("ko_dates", "")
+    coupon_dates_value = canonical.get("coupon_dates", "")
+    ko_dates = _parse_dates(ko_dates_value)
+    coupon_dates = _parse_dates(coupon_dates_value)
+    first_ko = ko_dates[0] if ko_dates else None
+    has_ko = bool(_split_values(ko_dates_value))
+
+    frequency, gap_text = _frequency(ko_dates_value)
+    coupon_frequency, coupon_gap_text = _frequency(coupon_dates_value)
+    if not frequency:
+        frequency, gap_text = coupon_frequency, coupon_gap_text
+    gap_months = int(gap_text) if gap_text.isdigit() else 0
+    coupon_gap_months = int(coupon_gap_text) if coupon_gap_text.isdigit() else gap_months
+
+    grid = _observation_grid(coupon_dates, ko_dates, strike_date, maturity, gap_months)
+
     has_put = bool(
         canonical.get("put_type", "")
         and canonical.get("put_type", "").upper() not in {"NA", "N/A", "NONE"}
     )
+
     if has_ko and has_put:
         structure = "Autocallable & BRC"
     elif has_ko:
@@ -409,14 +589,34 @@ def map_trade(
 
     coupon_barrier = canonical.get("coupon_barrier", "")
     coupon_barrier_value = _percentage_number(coupon_barrier)
-
     if coupon_barrier_value == "0":
         coupon_type = "Guaranteed"
     elif _split_values(coupon_barrier):
         coupon_type = "Conditional"
     else:
         coupon_type = "Fixed"
-    
+
+    basket_type, basket_note = _basket_type(canonical.get("basket_type", ""), len(tickers))
+    if basket_note:
+        notes.append(basket_note)
+
+    autocall_trigger, autocall_step, autocall_note = _trigger_and_step(
+        canonical.get("ko_barrier", ""), ko_dates_value, grid
+    )
+    if autocall_note:
+        notes.append(autocall_note)
+
+    coupon_trigger, coupon_step, coupon_note = _trigger_and_step(
+        coupon_barrier, coupon_dates_value, grid
+    )
+    if coupon_note:
+        notes.append(coupon_note.replace("autocall", "coupon"))
+
+    coupon_pa, coupon_pa_note = _coupon_pa(
+        canonical.get("coupons", ""), canonical.get("coupon_pa", ""), coupon_gap_months
+    )
+    if coupon_pa_note:
+        notes.append(coupon_pa_note)
 
     fields = {column: "" for column in EMAIL_COLUMNS}
     fields.update(
@@ -426,6 +626,7 @@ def map_trade(
             "Rates Curve Index": canonical.get("swap_benchmark", ""),
             "Issuer / Spread": _percentage_number(canonical.get("swap_spread", "")),
             "Currency": canonical.get("currency", ""),
+            "Basket Type": basket_type,
             "Size": re.sub(r"[^0-9.-]", "", canonical.get("size", "")),
             "Reoffer / Upfront (%)": _percentage_number(canonical.get("reoffer", "")),
             "Strike Date": strike_date.strftime("%d/%m/%Y") if strike_date else "",
@@ -433,13 +634,13 @@ def map_trade(
             "Autocall (Yes/No)": "Yes" if has_ko else "No",
             "Frequency": frequency,
             "First Observation in (m)": _months_between(strike_date, first_ko),
-            "Autocall Trigger Level (%)": _percentage_number(canonical.get("ko_barrier", "")),
-            "Autocall Step Down/Up (%)": _step(canonical.get("ko_barrier", "")),
+            "Autocall Trigger Level (%)": autocall_trigger,
+            "Autocall Step Down/Up (%)": autocall_step,
             "Coupon Type": coupon_type,
             "Memory": _yes_no(canonical.get("memory", "")),
-            "Coupon Trigger Level (%)": _percentage_number(coupon_barrier),
-            "Coupon Step Down/Up (%)": _step(coupon_barrier),
-            "Coupon p.a. (%)": _percentage_number(canonical.get("coupon_pa", "")),
+            "Coupon Trigger Level (%)": coupon_trigger,
+            "Coupon Step Down/Up (%)": coupon_step,
+            "Coupon p.a. (%)": coupon_pa,
             "Strike Level (%)": _percentage_number(canonical.get("put_strike", "")),
             "Downside Leverage (%)": _percentage_number(canonical.get("put_leverage", "")),
             "Barrier Type": barrier_type,
@@ -449,12 +650,10 @@ def map_trade(
     for index, ticker in enumerate(tickers, start=1):
         fields[f"Bloomberg Ticker {index}"] = ticker
 
+    if not fields["Strike Date"]:
+        notes.append("Strike Date is missing. Agile will assume today's date; add one if the trade strikes on another day.")
     if not fields["Reoffer / Upfront (%)"]:
         notes.append("Reoffer / Upfront (%) is missing and needs a manual input or another source.")
-    if not fields["Coupon p.a. (%)"] and canonical.get("coupons"):
-        notes.append(
-            "Coupons per observation exists, but Coupon p.a. is not annualised automatically. Review this value before sending."
-        )
     if has_put and not canonical.get("strike_forward"):
         notes.append("Strike Forward (Bd) is missing. Add it if Agile requires this field.")
 
@@ -515,7 +714,6 @@ def build_html_table(fields_or_rows: dict[str, str] | Iterable[dict[str, str]]) 
         "font-family:Arial,Helvetica,sans-serif;font-size:10px;"
         "text-align:left;vertical-align:top;white-space:normal;"
     )
-
     headers = "".join(
         f'<th style="{header_style}">{_html_cell_text(column)}</th>'
         for column in EMAIL_COLUMNS
@@ -528,7 +726,6 @@ def build_html_table(fields_or_rows: dict[str, str] | Iterable[dict[str, str]]) 
         )
         body_rows.append(f"<tr>{values}</tr>")
     body = "".join(body_rows)
-
     return f"""<!doctype html>
 <html>
 <head>
@@ -584,7 +781,6 @@ def save_outputs(
     result_list = [results] if isinstance(results, MappingResult) else list(results)
     if not result_list:
         raise ValueError("There are no mapped trades to save.")
-
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     html_path = output / "generated_trade_email.html"
@@ -592,7 +788,6 @@ def save_outputs(
     json_path = output / "mapping_result.json"
     subject = combined_subject(result_list)
     field_rows = [result.fields for result in result_list]
-
     html_path.write_text(build_html_table(field_rows), encoding="utf-8")
     eml_path.write_bytes(build_eml(to_address, subject, field_rows))
     json_path.write_text(
@@ -634,4 +829,3 @@ if __name__ == "__main__":
             print(f"\nReview notes for {result.trade_id or 'trade'}:")
             for note in result.review_notes:
                 print(f"- {note}")
-
