@@ -9,6 +9,7 @@ from trade_mapper import (
     EMAIL_COLUMNS,
     build_eml,
     build_html_table,
+    build_preview_with_copy_button,
     combined_subject,
     load_trade_file,
     map_trades,
@@ -32,7 +33,7 @@ with st.sidebar:
         "1. Upload the trade file.\n"
         "2. Review the mapped rows.\n"
         "3. Correct any highlighted fields.\n"
-        "4. Download the Outlook `.eml` file."
+        "4. Copy the table or download the Outlook `.eml` file."
     )
     st.info(
         "Files are processed during the active app session. The app does not "
@@ -63,6 +64,7 @@ trade_labels = [
     result.trade_id or f"Trade {index + 1}"
     for index, result in enumerate(results)
 ]
+
 st.success(f"Recognised {len(results)} trade{'s' if len(results) != 1 else ''}.")
 
 with st.expander("Recognised source fields", expanded=False):
@@ -108,6 +110,7 @@ subject = st.text_input("Subject", value=combined_subject(results))
 review_lines: list[str] = []
 for label, result in zip(trade_labels, results):
     review_lines.extend(f"{label}: {note}" for note in result.review_notes)
+
 if review_lines:
     st.warning("\n".join(f"• {line}" for line in review_lines))
 
@@ -122,9 +125,11 @@ if any(result.unmapped_source_fields for result in results):
         st.json(results[unmapped_index].unmapped_source_fields)
 
 st.subheader("Email preview")
-preview_height = min(300 + len(results) * 35, 650)
+# The preview includes a "Copy table" button that copies the table (with its
+# formatting and any edits made above) so it can be pasted into Outlook.
+preview_height = min(340 + len(results) * 35, 690)
 st.components.v1.html(
-    build_html_table(field_rows),
+    build_preview_with_copy_button(field_rows),
     height=preview_height,
     scrolling=True,
 )
@@ -172,5 +177,6 @@ with col3:
 
 st.caption(
     "The cloud version creates a downloadable `.eml` file. Open it in Outlook, "
-    "review the recipient and trade details, and send it manually."
+    "review the recipient and trade details, and send it manually. You can also "
+    "use the Copy table button and paste the table straight into an email."
 )
