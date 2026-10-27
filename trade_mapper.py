@@ -724,6 +724,90 @@ def build_html_table(fields_or_rows: dict[str, str] | Iterable[dict[str, str]]) 
 </html>"""
 
 
+_COPY_PREVIEW_SCRIPT = """
+<script>
+(function () {
+  const button = document.getElementById("copy-table-btn");
+  const status = document.getElementById("copy-table-status");
+  const container = document.getElementById("email-table");
+
+  function plainText() {
+    return Array.from(container.querySelectorAll("tr"))
+      .map(function (row) {
+        return Array.from(row.children).map(function (cell) { return cell.innerText; }).join("\\t");
+      })
+      .join("\\n");
+  }
+
+  function copyBySelection() {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(container);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+    selection.removeAllRanges();
+    return ok;
+  }
+
+  async function copyTable() {
+    // Copy as rich HTML (keeps borders/formatting when pasted into Outlook)
+    // with a tab-separated plain-text fallback for Excel / plain editors.
+    if (navigator.clipboard && window.ClipboardItem) {
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([container.innerHTML], { type: "text/html" }),
+            "text/plain": new Blob([plainText()], { type: "text/plain" }),
+          }),
+        ]);
+        return true;
+      } catch (err) {
+        // Clipboard API blocked (e.g. iframe permissions): fall back below.
+      }
+    }
+    return copyBySelection();
+  }
+
+  button.addEventListener("click", async function () {
+    const ok = await copyTable();
+    status.textContent = ok
+      ? "Copied - paste into Outlook"
+      : "Copy blocked by the browser - select the table and press Ctrl+C";
+    status.style.color = ok ? "#1a7f37" : "#b42318";
+    setTimeout(function () { status.textContent = ""; }, 4000);
+  });
+})();
+</script>
+"""
+
+
+def build_preview_with_copy_button(fields_or_rows: dict[str, str] | Iterable[dict[str, str]]) -> str:
+    """Email preview table with a "Copy table" button above it.
+
+    The button copies the table exactly as it will appear in the email, so it
+    can be pasted straight into an Outlook message.
+    """
+    document = build_html_table(fields_or_rows)
+    match = re.search(r"<table.*</table>", document, flags=re.S)
+    table = match.group(0) if match else document
+    button_style = (
+        "font-family:Arial,Helvetica,sans-serif;font-size:12px;padding:6px 12px;"
+        "border:1px solid #b7b7b7;border-radius:4px;background:#ffffff;cursor:pointer;"
+    )
+    return (
+        '<div style="font-family:Arial,Helvetica,sans-serif;">'
+        '<div style="margin:0 0 8px 0;">'
+        f'<button id="copy-table-btn" type="button" style="{button_style}">Copy table</button>'
+        '<span id="copy-table-status" style="margin-left:10px;font-size:12px;"></span>'
+        "</div>"
+        f'<div id="email-table">{table}</div>'
+        "</div>"
+        + _COPY_PREVIEW_SCRIPT
+    )
+
+
 def build_eml(
     to_address: str,
     subject: str,
