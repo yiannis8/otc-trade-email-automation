@@ -422,6 +422,42 @@ def _step_or_schedule(levels: list[str] | str, full_value: str, no_autocall_abov
     return step
 
 
+def _is_zero_or_blank(value: str) -> bool:
+    number = _to_float(value) if value else None
+    return not value or (number is not None and number == 0)
+
+
+def _coupon_per_annum(canonical: dict[str, str]) -> tuple[str, str]:
+    """Return (Coupon p.a. (%), review note).
+
+    Uses an explicit coupon p.a. if the file has one. Otherwise annualises the
+    coupon per observation using the coupon (or KO) date frequency, e.g.
+    1.97% quarterly -> 7.88% p.a. A zero or missing coupon counts as "no coupon".
+    """
+    explicit = _percentage_number(canonical.get("coupon_pa", ""))
+    if not _is_zero_or_blank(explicit):
+        return explicit, ""
+
+    per_observation = _percentage_number(canonical.get("coupons", ""))
+    if _is_zero_or_blank(per_observation):
+        return "", ""
+    rate = _to_float(per_observation)
+    if rate is None:
+        return "", f"Coupon per observation '{per_observation}' could not be read. Enter Coupon p.a. manually."
+
+    _, gap = _frequency(canonical.get("coupon_dates", "") or canonical.get("ko_dates", ""))
+    if not gap or int(gap) == 0:
+        return "", (
+            f"Coupon per observation is {per_observation}%, but the coupon frequency could not be "
+            "determined to annualise it. Enter Coupon p.a. manually."
+        )
+    per_annum = round(rate * 12 / int(gap), 6)
+    return f"{per_annum:g}", (
+        f"Coupon p.a. annualised from {per_observation}% per observation "
+        f"x {12 // int(gap) if 12 % int(gap) == 0 else round(12 / int(gap), 4)} per year."
+    )
+
+
 def _yes_no(value: str) -> str:
     text = str(value or "").strip().upper()
     if text in {"TRUE", "YES", "Y", "1"}:
@@ -558,6 +594,14 @@ def map_trade(
     else:
         coupon_type = "Fixed"
 
+    # Coupon vs upfront: if a coupon is available, fill Coupon p.a. and leave
+    # Reoffer / Upfront blank; if only an upfront is available, fill it and
+    # leave Coupon p.a. blank.
+    coupon_pa, coupon_note = _coupon_per_annum(canonical)
+    if coupon_note:
+        notes.append(coupon_note)
+    upfront = "" if coupon_pa else _percentage_number(canonical.get("reoffer", ""))
+
     fields = {column: "" for column in EMAIL_COLUMNS}
     fields.update(
         {
@@ -567,7 +611,7 @@ def map_trade(
             "Issuer / Spread": _percentage_number(canonical.get("swap_spread", "")),
             "Currency": canonical.get("currency", ""),
             "Size": re.sub(r"[^0-9.-]", "", canonical.get("size", "")),
-            "Reoffer / Upfront (%)": _percentage_number(canonical.get("reoffer", "")),
+            "Reoffer / Upfront (%)": upfront,
             "Strike Date": strike_date.strftime("%d/%m/%Y") if strike_date else "",
             "Tenor (m)": _months_between(strike_date, maturity),
             "Autocall (Yes/No)": "Yes" if has_ko else "No",
@@ -579,7 +623,7 @@ def map_trade(
             "Memory": _yes_no(canonical.get("memory", "")),
             "Coupon Trigger Level (%)": _percentage_number(coupon_barrier),
             "Coupon Step Down/Up (%)": _step_or_schedule(coupon_barrier, coupon_barrier),
-            "Coupon p.a. (%)": _percentage_number(canonical.get("coupon_pa", "")),
+            "Coupon p.a. (%)": coupon_pa,
             "Strike Level (%)": _percentage_number(canonical.get("put_strike", "")),
             "Downside Leverage (%)": _percentage_number(canonical.get("put_leverage", "")),
             "Barrier Type": barrier_type,
@@ -589,12 +633,8 @@ def map_trade(
     for index, ticker in enumerate(tickers, start=1):
         fields[f"Bloomberg Ticker {index}"] = ticker
 
-    if not fields["Reoffer / Upfront (%)"]:
-        notes.append("Reoffer / Upfront (%) is missing and needs a manual input or another source.")
-    if not fields["Coupon p.a. (%)"] and canonical.get("coupons"):
-        notes.append(
-            "Coupons per observation exists, but Coupon p.a. is not annualised automatically. Review this value before sending."
-        )
+    if not coupon_pa and not upfront:
+        notes.append("Neither a coupon nor a Reoffer / Upfront (%) was found. Add one manually.")
     if has_put and not canonical.get("strike_forward"):
         notes.append("Strike Forward (Bd) is missing. Add it if Agile requires this field.")
 
