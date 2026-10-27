@@ -535,6 +535,20 @@ def map_trade(
     barrier_type = "None" if no_barrier else (ki_monitoring or "Review")
     barrier_level = "" if no_barrier else _percentage_number(knock_in)
 
+    # Autocall trigger / step down:
+    # - clear step pattern -> starting trigger in "Autocall Trigger Level (%)"
+    #   and the constant step in "Autocall Step Down/Up (%)";
+    # - variable step down -> trigger left blank and the full schedule
+    #   (e.g. None/100/100/95.10/...) goes in "Autocall Step Down/Up (%)".
+    autocall_trigger = ""
+    autocall_step = ""
+    if has_ko and callable_barriers:
+        if _step(callable_barriers) == "Variable":
+            autocall_step = _barrier_schedule(canonical.get("ko_barrier", ""), NO_AUTOCALL_THRESHOLD)
+        else:
+            autocall_trigger = _percentage_number(callable_barriers[0])
+            autocall_step = _step(callable_barriers)
+
     coupon_barrier = canonical.get("coupon_barrier", "")
     coupon_barrier_value = _percentage_number(coupon_barrier)
     if coupon_barrier_value == "0":
@@ -559,12 +573,8 @@ def map_trade(
             "Autocall (Yes/No)": "Yes" if has_ko else "No",
             "Frequency": frequency,
             "First Observation in (m)": _months_between(strike_date, first_ko),
-            "Autocall Trigger Level (%)": _percentage_number(callable_barriers[0]) if has_ko and callable_barriers else "",
-            "Autocall Step Down/Up (%)": (
-                _step_or_schedule(callable_barriers, canonical.get("ko_barrier", ""), NO_AUTOCALL_THRESHOLD)
-                if has_ko
-                else ""
-            ),
+            "Autocall Trigger Level (%)": autocall_trigger,
+            "Autocall Step Down/Up (%)": autocall_step,
             "Coupon Type": coupon_type,
             "Memory": _yes_no(canonical.get("memory", "")),
             "Coupon Trigger Level (%)": _percentage_number(coupon_barrier),
