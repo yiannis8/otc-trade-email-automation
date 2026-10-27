@@ -23,7 +23,7 @@ st.set_page_config(
 
 st.title("Trade Email Builder")
 st.caption(
-    "Upload a single-trade or multi-trade CSV/XLSX, review the recognised rows, "
+    "Upload a single-trade or multi-trade CSV/XLSX, check the email preview, "
     "and download one Outlook-compatible email draft."
 )
 
@@ -31,9 +31,8 @@ with st.sidebar:
     st.header("How it works")
     st.markdown(
         "1. Upload the trade file.\n"
-        "2. Review the mapped rows.\n"
-        "3. Correct any highlighted fields.\n"
-        "4. Copy the table or download the Outlook `.eml` file."
+        "2. Check the email preview and any review notes.\n"
+        "3. Copy the table or download the Outlook `.eml` file."
     )
     st.info(
         "Files are processed during the active app session. The app does not "
@@ -67,6 +66,31 @@ trade_labels = [
 
 st.success(f"Recognised {len(results)} trade{'s' if len(results) != 1 else ''}.")
 
+field_rows: list[dict[str, str]] = [
+    {column: result.fields.get(column, "") for column in EMAIL_COLUMNS}
+    for result in results
+]
+
+st.subheader("Email preview")
+# The preview includes a "Copy table" button that copies the table with its
+# formatting so it can be pasted straight into Outlook.
+preview_height = min(160 + len(results) * 35, 690)
+st.components.v1.html(
+    build_preview_with_copy_button(field_rows),
+    height=preview_height,
+    scrolling=True,
+)
+
+review_lines: list[str] = []
+for label, result in zip(trade_labels, results):
+    review_lines.extend(f"{label}: {note}" for note in result.review_notes)
+
+if review_lines:
+    st.warning("\n".join(f"• {line}" for line in review_lines))
+
+recipient = st.text_input("Recipient", value="Agile@marexfp.com")
+subject = st.text_input("Subject", value=combined_subject(results))
+
 with st.expander("Recognised source fields", expanded=False):
     selected_label = st.selectbox("Choose trade", trade_labels)
     selected_index = trade_labels.index(selected_label)
@@ -77,43 +101,6 @@ with st.expander("Recognised source fields", expanded=False):
     )
     st.dataframe(source_df, use_container_width=True, hide_index=True)
 
-st.subheader("Email rows")
-email_df = pd.DataFrame(
-    [
-        {"Trade ID": trade_labels[index], **result.fields}
-        for index, result in enumerate(results)
-    ]
-)
-
-edited_df = st.data_editor(
-    email_df,
-    use_container_width=True,
-    hide_index=True,
-    disabled=["Trade ID"],
-    num_rows="fixed",
-    height=min(180 + len(results) * 38, 520),
-    key=f"email_fields_{uploaded.name}_{len(results)}",
-)
-
-field_rows: list[dict[str, str]] = []
-for _, row in edited_df.iterrows():
-    field_rows.append(
-        {
-            column: "" if pd.isna(row.get(column)) else str(row.get(column))
-            for column in EMAIL_COLUMNS
-        }
-    )
-
-recipient = st.text_input("Recipient", value="Agile@marexfp.com")
-subject = st.text_input("Subject", value=combined_subject(results))
-
-review_lines: list[str] = []
-for label, result in zip(trade_labels, results):
-    review_lines.extend(f"{label}: {note}" for note in result.review_notes)
-
-if review_lines:
-    st.warning("\n".join(f"• {line}" for line in review_lines))
-
 if any(result.unmapped_source_fields for result in results):
     with st.expander("Unmapped source fields"):
         unmapped_label = st.selectbox(
@@ -123,16 +110,6 @@ if any(result.unmapped_source_fields for result in results):
         )
         unmapped_index = trade_labels.index(unmapped_label)
         st.json(results[unmapped_index].unmapped_source_fields)
-
-st.subheader("Email preview")
-# The preview includes a "Copy table" button that copies the table (with its
-# formatting and any edits made above) so it can be pasted into Outlook.
-preview_height = min(340 + len(results) * 35, 690)
-st.components.v1.html(
-    build_preview_with_copy_button(field_rows),
-    height=preview_height,
-    scrolling=True,
-)
 
 base_name = "multi_trade" if len(results) > 1 else (trade_labels[0] or "trade")
 col1, col2, col3 = st.columns(3)
