@@ -388,6 +388,40 @@ def _autocall_schedule(
     return callable_barriers, callable_dates, skipped_dates, notes
 
 
+def _schedule_level(value: str) -> str:
+    """Format a barrier level for a schedule: 100 -> "100", 95.1 -> "95.10"."""
+    number = _to_float(value)
+    if number is None:
+        return str(value).strip()
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}"
+
+
+def _barrier_schedule(value: str, no_autocall_above: float | None = None) -> str:
+    """Full barrier schedule, e.g. "None/100/100/95.10/95.10/90.20".
+
+    Levels above ``no_autocall_above`` are shown as "None" (no autocall on
+    that observation, matching the pricer).
+    """
+    parts = []
+    for part in _split_values(value):
+        number = _to_float(part)
+        if no_autocall_above is not None and number is not None and number > no_autocall_above:
+            parts.append("None")
+        else:
+            parts.append(_schedule_level(part))
+    return "/".join(parts)
+
+
+def _step_or_schedule(levels: list[str] | str, full_value: str, no_autocall_above: float | None = None) -> str:
+    """Constant step (e.g. "-2") if there is one, otherwise the full schedule."""
+    step = _step(levels)
+    if step == "Variable":
+        return _barrier_schedule(full_value, no_autocall_above)
+    return step
+
+
 def _yes_no(value: str) -> str:
     text = str(value or "").strip().upper()
     if text in {"TRUE", "YES", "Y", "1"}:
@@ -526,11 +560,15 @@ def map_trade(
             "Frequency": frequency,
             "First Observation in (m)": _months_between(strike_date, first_ko),
             "Autocall Trigger Level (%)": _percentage_number(callable_barriers[0]) if has_ko and callable_barriers else "",
-            "Autocall Step Down/Up (%)": _step(callable_barriers) if has_ko else "",
+            "Autocall Step Down/Up (%)": (
+                _step_or_schedule(callable_barriers, canonical.get("ko_barrier", ""), NO_AUTOCALL_THRESHOLD)
+                if has_ko
+                else ""
+            ),
             "Coupon Type": coupon_type,
             "Memory": _yes_no(canonical.get("memory", "")),
             "Coupon Trigger Level (%)": _percentage_number(coupon_barrier),
-            "Coupon Step Down/Up (%)": _step(coupon_barrier),
+            "Coupon Step Down/Up (%)": _step_or_schedule(coupon_barrier, coupon_barrier),
             "Coupon p.a. (%)": _percentage_number(canonical.get("coupon_pa", "")),
             "Strike Level (%)": _percentage_number(canonical.get("put_strike", "")),
             "Downside Leverage (%)": _percentage_number(canonical.get("put_leverage", "")),
