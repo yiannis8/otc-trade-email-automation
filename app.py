@@ -47,7 +47,8 @@ uploaded = st.file_uploader(
 
 if uploaded is None:
     st.info(
-        "Supported layouts: one field/value pair per row, multiple trades across "
+        "Choose a file above to begin. Supported layouts: one field/value pair "
+        "per row, multiple trades across "
         "columns, or a standard table with one trade per row."
     )
     st.stop()

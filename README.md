@@ -6,6 +6,7 @@ A Streamlit app that converts single-trade or multi-trade CSV/XLSX files into an
 
 - Reads CSV, XLSX, and XLSM files.
 - Supports one trade, multiple trades across columns, or one trade per row.
+- Preserves Excel dates and percentage units (for example, a 60% cell imports as 60%, not 0.6%).
 - Maps source fields into the target email schema.
 - Shows validation and review warnings.
 - Lets users edit recognised fields before generating the email.
@@ -42,6 +43,8 @@ python -m streamlit run app.py
 ```
 
 Open `http://localhost:8501` if the browser does not open automatically.
+
+Run the importer regression tests with `python -m unittest -v`.
 
 ## Deploy
 

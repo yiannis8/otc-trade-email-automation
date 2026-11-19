@@ -172,8 +172,14 @@ def _read_rows(path_or_bytes: str | Path | bytes, filename: str | None = None) -
         from openpyxl import load_workbook
 
         wb = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
-        ws = wb[wb.sheetnames[0]]
-        rows = [list(row) for row in ws.iter_rows(values_only=True)]
+        try:
+            ws = wb[wb.sheetnames[0]]
+            rows = [
+                [_excel_cell_value(cell) for cell in row]
+                for row in ws.iter_rows()
+            ]
+        finally:
+            wb.close()
     else:
         rows = _parse_csv_text(_decode_csv_text(raw))
 
@@ -181,6 +187,22 @@ def _read_rows(path_or_bytes: str | Path | bytes, filename: str | None = None) -
     if not rows:
         raise ValueError("The file contains no usable rows.")
     return rows
+
+
+def _excel_cell_value(cell: Any) -> Any:
+    """Keep dates and convert Excel percentage cells to percentage points.
+
+    Excel stores 60% as 0.6. The mapper expects 60, as in CSV exports.
+    Use the cell format rather than guessing from the size of the number:
+    an unformatted 0.6 can legitimately mean 0.6%.
+    """
+    value = cell.value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Quoted and escaped percent signs are display literals, not scaling.
+        number_format = re.sub(r'"[^\"]*"|\\.', "", cell.number_format or "")
+        if "%" in number_format:
+            return f"{value * 100:.15g}%"
+    return value
 
 
 def load_trade_file(
