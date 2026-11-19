@@ -139,7 +139,7 @@ def _decode_csv_text(raw: bytes) -> str:
     return raw.decode("utf-8-sig")
 
 
-def _parse_csv_text(text: str) -> list[list[str]]:
+def _parse_csv_text(text: str, delimiter: str | None = None) -> list[list[str]]:
     """Parse CSV text whatever its line endings.
 
     Marex/Vizibility and Excel-for-Mac exports use bare CR (``\\r``) line
@@ -150,12 +150,13 @@ def _parse_csv_text(text: str) -> list[list[str]]:
     quoted cells.
     """
     text = text.lstrip("\ufeff").replace("\x00", "")
-    sample = text[:4096]
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-        delimiter = dialect.delimiter
-    except csv.Error:
-        delimiter = ","
+    if delimiter is None:
+        sample = text[:4096]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            delimiter = dialect.delimiter
+        except csv.Error:
+            delimiter = ","
     return list(csv.reader(io.StringIO(text, newline=""), delimiter=delimiter))
 
 
@@ -181,7 +182,7 @@ def _read_rows(path_or_bytes: str | Path | bytes, filename: str | None = None) -
         finally:
             wb.close()
     else:
-        rows = _parse_csv_text(_decode_csv_text(raw))
+        rows = _parse_csv_text(_decode_csv_text(raw), "\t" if suffix == ".tsv" else None)
 
     rows = [row for row in rows if any(_clean_value(value) for value in row)]
     if not rows:

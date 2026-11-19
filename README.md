@@ -5,6 +5,7 @@ A Streamlit app that converts single-trade or multi-trade CSV/XLSX files into an
 ## Features
 
 - Reads CSV, XLSX, and XLSM files.
+- Accepts cells pasted directly from Excel as an alternative when file uploads fail.
 - Supports one trade, multiple trades across columns, or one trade per row.
 - Preserves Excel dates and percentage units (for example, a 60% cell imports as 60%, not 0.6%).
 - Maps source fields into the target email schema.
